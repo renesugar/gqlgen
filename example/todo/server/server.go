@@ -7,14 +7,14 @@ import (
 	"net/http"
 	"runtime/debug"
 
-	"github.com/vektah/gqlgen/example/todo"
-	"github.com/vektah/gqlgen/handler"
+	"github.com/99designs/gqlgen/example/todo"
+	"github.com/99designs/gqlgen/handler"
 )
 
 func main() {
 	http.Handle("/", handler.Playground("Todo", "/query"))
 	http.Handle("/query", handler.GraphQL(
-		todo.MakeExecutableSchema(todo.New()),
+		todo.NewExecutableSchema(todo.New()),
 		handler.RecoverFunc(func(ctx context.Context, err interface{}) error {
 			// send this panic somewhere
 			log.Print(err)

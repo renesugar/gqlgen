@@ -2,48 +2,30 @@ package graphql
 
 import (
 	"context"
-	"fmt"
-	"sync"
+
+	"github.com/vektah/gqlparser/gqlerror"
 )
 
-type ErrorPresenterFunc func(context.Context, error) error
+type ErrorPresenterFunc func(context.Context, error) *gqlerror.Error
 
-func DefaultErrorPresenter(ctx context.Context, err error) error {
-	return &ResolverError{
-		Message: err.Error(),
-		Path:    GetResolverContext(ctx).Path,
+type ExtendedError interface {
+	Extensions() map[string]interface{}
+}
+
+func DefaultErrorPresenter(ctx context.Context, err error) *gqlerror.Error {
+	if gqlerr, ok := err.(*gqlerror.Error); ok {
+		gqlerr.Path = GetResolverContext(ctx).Path()
+		return gqlerr
 	}
-}
 
-// ResolverError is the default error type returned by ErrorPresenter. You can replace it with your own by returning
-// something different from the ErrorPresenter
-type ResolverError struct {
-	Message string        `json:"message"`
-	Path    []interface{} `json:"path,omitempty"`
-}
+	var extensions map[string]interface{}
+	if ee, ok := err.(ExtendedError); ok {
+		extensions = ee.Extensions()
+	}
 
-func (r *ResolverError) Error() string {
-	return r.Message
-}
-
-type ErrorBuilder struct {
-	Errors []error
-	// ErrorPresenter will be used to generate the error
-	// message from errors given to Error().
-	ErrorPresenter ErrorPresenterFunc
-	mu             sync.Mutex
-}
-
-func (c *ErrorBuilder) Errorf(ctx context.Context, format string, args ...interface{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.Errors = append(c.Errors, c.ErrorPresenter(ctx, fmt.Errorf(format, args...)))
-}
-
-func (c *ErrorBuilder) Error(ctx context.Context, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.Errors = append(c.Errors, c.ErrorPresenter(ctx, err))
+	return &gqlerror.Error{
+		Message:    err.Error(),
+		Path:       GetResolverContext(ctx).Path(),
+		Extensions: extensions,
+	}
 }

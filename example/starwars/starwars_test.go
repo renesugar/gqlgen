@@ -4,14 +4,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/99designs/gqlgen/client"
+	"github.com/99designs/gqlgen/example/starwars/generated"
+	"github.com/99designs/gqlgen/graphql/introspection"
+	"github.com/99designs/gqlgen/handler"
 	"github.com/stretchr/testify/require"
-	"github.com/vektah/gqlgen/client"
-	"github.com/vektah/gqlgen/handler"
-	introspection "github.com/vektah/gqlgen/neelance/introspection"
 )
 
 func TestStarwars(t *testing.T) {
-	srv := httptest.NewServer(handler.GraphQL(MakeExecutableSchema(NewResolver())))
+	srv := httptest.NewServer(handler.GraphQL(generated.NewExecutableSchema(NewResolver())))
 	c := client.New(srv.URL)
 
 	t.Run("Lukes starships", func(t *testing.T) {
@@ -31,7 +32,7 @@ func TestStarwars(t *testing.T) {
 				Typename string `json:"__typename"`
 			}
 		}
-		c.MustPost(`{ character(id:2001) { name, __typename } }`, &resp)
+		c.MustPost(`{ character(id:"2001") { name, __typename } }`, &resp)
 
 		require.Equal(t, "R2-D2", resp.Character.Name)
 		require.Equal(t, "Droid", resp.Character.Typename)
@@ -41,7 +42,7 @@ func TestStarwars(t *testing.T) {
 		var resp struct {
 			Character *struct{ Name string }
 		}
-		c.MustPost(`{ character(id:2002) { name } }`, &resp)
+		c.MustPost(`{ character(id:"2002") { name } }`, &resp)
 
 		require.Nil(t, resp.Character)
 	})
@@ -50,7 +51,7 @@ func TestStarwars(t *testing.T) {
 		var resp struct {
 			Droid struct{ PrimaryFunction string }
 		}
-		c.MustPost(`{ droid(id:2001) { primaryFunction } }`, &resp)
+		c.MustPost(`{ droid(id:"2001") { primaryFunction } }`, &resp)
 
 		require.Equal(t, "Astromech", resp.Droid.PrimaryFunction)
 	})
@@ -64,7 +65,7 @@ func TestStarwars(t *testing.T) {
 				}
 			}
 		}
-		c.MustPost(`{ human(id:1000) { starships { name length(unit:FOOT) } } }`, &resp)
+		c.MustPost(`{ human(id:"1000") { starships { name length(unit:FOOT) } } }`, &resp)
 
 		require.Equal(t, "X-Wing", resp.Human.Starships[0].Name)
 		require.Equal(t, 41.0105, resp.Human.Starships[0].Length)
@@ -103,7 +104,7 @@ func TestStarwars(t *testing.T) {
 				}
 			}
 		}
-		c.MustPost(`{ human(id: 1001) { friends { name } } }`, &resp)
+		c.MustPost(`{ human(id: "1001") { friends { name } } }`, &resp)
 
 		require.Equal(t, "Wilhuff Tarkin", resp.Human.Friends[0].Name)
 	})
@@ -118,7 +119,7 @@ func TestStarwars(t *testing.T) {
 				}
 			}
 		}
-		c.MustPost(`{ droid(id:2001) { friendsConnection { friends { name } } } }`, &resp)
+		c.MustPost(`{ droid(id:"2001") { friendsConnection { friends { name } } } }`, &resp)
 
 		require.Equal(t, "Luke Skywalker", resp.Droid.FriendsConnection.Friends[0].Name)
 		require.Equal(t, "Han Solo", resp.Droid.FriendsConnection.Friends[1].Name)
@@ -138,7 +139,7 @@ func TestStarwars(t *testing.T) {
 				}
 			}
 		}
-		c.MustPost(`{ droid(id:2001) { friendsConnection { edges { cursor, node { name } } } } }`, &resp)
+		c.MustPost(`{ droid(id:"2001") { friendsConnection { edges { cursor, node { name } } } } }`, &resp)
 
 		require.Equal(t, "Y3Vyc29yMQ==", resp.Droid.FriendsConnection.Edges[0].Cursor)
 		require.Equal(t, "Luke Skywalker", resp.Droid.FriendsConnection.Edges[0].Node.Name)
@@ -215,7 +216,7 @@ func TestStarwars(t *testing.T) {
 		  }
 		}`, &resp, client.Var("episode", "INVALID"))
 
-		require.EqualError(t, err, `[{"message":"INVALID is not a valid Episode"}]`)
+		require.EqualError(t, err, `[{"message":"INVALID is not a valid Episode","path":["createReview"]}]`)
 	})
 
 	t.Run("introspection", func(t *testing.T) {
@@ -234,8 +235,8 @@ func TestStarwars(t *testing.T) {
 			}
 		}
 		c.MustPost(`{
-			character(id: 2001) { name }
-			aliasedCharacter: character(id: 2001) { name }
+			character(id: "2001") { name }
+			aliasedCharacter: character(id: "2001") { name }
 		}`, &resp)
 		require.Equal(t, resp.Character, resp.AliasedCharacter)
 	})

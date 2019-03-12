@@ -1,18 +1,22 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/gorilla/websocket"
-	"github.com/vektah/gqlgen/graphql"
-	"github.com/vektah/gqlgen/neelance/errors"
-	"github.com/vektah/gqlgen/neelance/query"
-	"github.com/vektah/gqlgen/neelance/validation"
+	"github.com/hashicorp/golang-lru"
+	"github.com/vektah/gqlparser"
+	"github.com/vektah/gqlparser/ast"
+	"github.com/vektah/gqlparser/gqlerror"
+	"github.com/vektah/gqlparser/validator"
 )
 
 const (
@@ -25,7 +29,7 @@ const (
 	dataMsg                = "data"                 // Server -> Client
 	errorMsg               = "error"                // Server -> Client
 	completeMsg            = "complete"             // Server -> Client
-	//connectionKeepAliveMsg = "ka"                 // Server -> Client  TODO: keepalives
+	connectionKeepAliveMsg = "ka"                   // Server -> Client
 )
 
 type operationMessage struct {
@@ -35,15 +39,19 @@ type operationMessage struct {
 }
 
 type wsConnection struct {
-	ctx    context.Context
-	conn   *websocket.Conn
-	exec   graphql.ExecutableSchema
-	active map[string]context.CancelFunc
-	mu     sync.Mutex
-	cfg    *Config
+	ctx             context.Context
+	conn            *websocket.Conn
+	exec            graphql.ExecutableSchema
+	active          map[string]context.CancelFunc
+	mu              sync.Mutex
+	cfg             *Config
+	cache           *lru.Cache
+	keepAliveTicker *time.Ticker
+
+	initPayload InitPayload
 }
 
-func connectWs(exec graphql.ExecutableSchema, w http.ResponseWriter, r *http.Request, cfg *Config) {
+func connectWs(exec graphql.ExecutableSchema, w http.ResponseWriter, r *http.Request, cfg *Config, cache *lru.Cache) {
 	ws, err := cfg.upgrader.Upgrade(w, r, http.Header{
 		"Sec-Websocket-Protocol": []string{"graphql-ws"},
 	})
@@ -59,6 +67,7 @@ func connectWs(exec graphql.ExecutableSchema, w http.ResponseWriter, r *http.Req
 		conn:   ws,
 		ctx:    r.Context(),
 		cfg:    cfg,
+		cache:  cache,
 	}
 
 	if !conn.init() {
@@ -77,6 +86,14 @@ func (c *wsConnection) init() bool {
 
 	switch message.Type {
 	case connectionInitMsg:
+		if len(message.Payload) > 0 {
+			c.initPayload = make(InitPayload)
+			err := json.Unmarshal(message.Payload, &c.initPayload)
+			if err != nil {
+				return false
+			}
+		}
+
 		c.write(&operationMessage{Type: connectionAckMsg})
 	case connectionTerminateMsg:
 		c.close(websocket.CloseNormalClosure, "terminated")
@@ -97,6 +114,20 @@ func (c *wsConnection) write(msg *operationMessage) {
 }
 
 func (c *wsConnection) run() {
+	// We create a cancellation that will shutdown the keep-alive when we leave
+	// this function.
+	ctx, cancel := context.WithCancel(c.ctx)
+	defer cancel()
+
+	// Create a timer that will fire every interval to keep the connection alive.
+	if c.cfg.connectionKeepAlivePingInterval != 0 {
+		c.mu.Lock()
+		c.keepAliveTicker = time.NewTicker(c.cfg.connectionKeepAlivePingInterval)
+		c.mu.Unlock()
+
+		go c.keepAlive(ctx)
+	}
+
 	for {
 		message := c.readOp()
 		if message == nil {
@@ -113,7 +144,7 @@ func (c *wsConnection) run() {
 			closer := c.active[message.ID]
 			c.mu.Unlock()
 			if closer == nil {
-				c.sendError(message.ID, errors.Errorf("%s is not running, cannot stop", message.ID))
+				c.sendError(message.ID, gqlerror.Errorf("%s is not running, cannot stop", message.ID))
 				continue
 			}
 
@@ -129,37 +160,69 @@ func (c *wsConnection) run() {
 	}
 }
 
+func (c *wsConnection) keepAlive(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			c.keepAliveTicker.Stop()
+			return
+		case <-c.keepAliveTicker.C:
+			c.write(&operationMessage{Type: connectionKeepAliveMsg})
+		}
+	}
+}
+
 func (c *wsConnection) subscribe(message *operationMessage) bool {
 	var reqParams params
-	if err := json.Unmarshal(message.Payload, &reqParams); err != nil {
+	if err := jsonDecode(bytes.NewReader(message.Payload), &reqParams); err != nil {
 		c.sendConnectionError("invalid json")
 		return false
 	}
 
-	doc, qErr := query.Parse(reqParams.Query)
-	if qErr != nil {
-		c.sendError(message.ID, qErr)
+	var (
+		doc      *ast.QueryDocument
+		cacheHit bool
+	)
+	if c.cache != nil {
+		val, ok := c.cache.Get(reqParams.Query)
+		if ok {
+			doc = val.(*ast.QueryDocument)
+			cacheHit = true
+		}
+	}
+	if !cacheHit {
+		var qErr gqlerror.List
+		doc, qErr = gqlparser.LoadQuery(c.exec.Schema(), reqParams.Query)
+		if qErr != nil {
+			c.sendError(message.ID, qErr...)
+			return true
+		}
+		if c.cache != nil {
+			c.cache.Add(reqParams.Query, doc)
+		}
+	}
+
+	op := doc.Operations.ForName(reqParams.OperationName)
+	if op == nil {
+		c.sendError(message.ID, gqlerror.Errorf("operation %s not found", reqParams.OperationName))
 		return true
 	}
 
-	errs := validation.Validate(c.exec.Schema(), doc)
-	if len(errs) != 0 {
-		c.sendError(message.ID, errs...)
-		return true
-	}
-
-	op, err := doc.GetOperation(reqParams.OperationName)
+	vars, err := validator.VariableValues(c.exec.Schema(), op, reqParams.Variables)
 	if err != nil {
-		c.sendError(message.ID, errors.Errorf("%s", err.Error()))
+		c.sendError(message.ID, err)
 		return true
 	}
-
-	reqCtx := c.cfg.newRequestContext(doc, reqParams.Query, reqParams.Variables)
+	reqCtx := c.cfg.newRequestContext(c.exec, doc, op, reqParams.Query, vars)
 	ctx := graphql.WithRequestContext(c.ctx, reqCtx)
 
-	if op.Type != query.Subscription {
+	if c.initPayload != nil {
+		ctx = withInitPayload(ctx, c.initPayload)
+	}
+
+	if op.Operation != ast.Subscription {
 		var result *graphql.Response
-		if op.Type == query.Query {
+		if op.Operation == ast.Query {
 			result = c.exec.Query(ctx, op)
 		} else {
 			result = c.exec.Mutation(ctx, op)
@@ -178,7 +241,7 @@ func (c *wsConnection) subscribe(message *operationMessage) bool {
 		defer func() {
 			if r := recover(); r != nil {
 				userErr := reqCtx.Recover(ctx, r)
-				c.sendError(message.ID, &errors.QueryError{Message: userErr.Error()})
+				c.sendError(message.ID, &gqlerror.Error{Message: userErr.Error()})
 			}
 		}()
 		next := c.exec.Subscription(ctx, op)
@@ -200,14 +263,14 @@ func (c *wsConnection) subscribe(message *operationMessage) bool {
 func (c *wsConnection) sendData(id string, response *graphql.Response) {
 	b, err := json.Marshal(response)
 	if err != nil {
-		c.sendError(id, errors.Errorf("unable to encode json response: %s", err.Error()))
+		c.sendError(id, gqlerror.Errorf("unable to encode json response: %s", err.Error()))
 		return
 	}
 
 	c.write(&operationMessage{Type: dataMsg, ID: id, Payload: b})
 }
 
-func (c *wsConnection) sendError(id string, errors ...*errors.QueryError) {
+func (c *wsConnection) sendError(id string, errors ...*gqlerror.Error) {
 	var errs []error
 	for _, err := range errors {
 		errs = append(errs, err)
@@ -220,7 +283,7 @@ func (c *wsConnection) sendError(id string, errors ...*errors.QueryError) {
 }
 
 func (c *wsConnection) sendConnectionError(format string, args ...interface{}) {
-	b, err := json.Marshal(&graphql.ResolverError{Message: fmt.Sprintf(format, args...)})
+	b, err := json.Marshal(&gqlerror.Error{Message: fmt.Sprintf(format, args...)})
 	if err != nil {
 		panic(err)
 	}
@@ -229,11 +292,17 @@ func (c *wsConnection) sendConnectionError(format string, args ...interface{}) {
 }
 
 func (c *wsConnection) readOp() *operationMessage {
-	message := operationMessage{}
-	if err := c.conn.ReadJSON(&message); err != nil {
+	_, r, err := c.conn.NextReader()
+	if err != nil {
 		c.sendConnectionError("invalid json")
 		return nil
 	}
+	message := operationMessage{}
+	if err := jsonDecode(r, &message); err != nil {
+		c.sendConnectionError("invalid json")
+		return nil
+	}
+
 	return &message
 }
 

@@ -2,51 +2,49 @@ package chat
 
 import (
 	"net/http/httptest"
-	"sync"
 	"testing"
+	"time"
 
+	"github.com/99designs/gqlgen/client"
+	"github.com/99designs/gqlgen/handler"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/vektah/gqlgen/client"
-	"github.com/vektah/gqlgen/handler"
 )
 
-func TestChat(t *testing.T) {
-	srv := httptest.NewServer(handler.GraphQL(MakeExecutableSchema(New())))
+func TestChatSubscriptions(t *testing.T) {
+	srv := httptest.NewServer(handler.GraphQL(NewExecutableSchema(New())))
 	c := client.New(srv.URL)
-	var wg sync.WaitGroup
-	wg.Add(1)
 
-	t.Run("subscribe to chat events", func(t *testing.T) {
-		t.Parallel()
+	sub := c.Websocket(`subscription { messageAdded(roomName:"#gophers") { text createdBy } }`)
+	defer sub.Close()
 
-		sub := c.Websocket(`subscription { messageAdded(roomName:"#gophers") { text createdBy } }`)
-		defer sub.Close()
+	go func() {
+		var resp interface{}
+		time.Sleep(10 * time.Millisecond)
+		err := c.Post(`mutation { 
+				a:post(text:"Hello!", roomName:"#gophers", username:"vektah") { id } 
+				b:post(text:"Whats up?", roomName:"#gophers", username:"vektah") { id } 
+			}`, &resp)
+		assert.NoError(t, err)
+	}()
 
-		wg.Done()
-		var resp struct {
+	var msg struct {
+		resp struct {
 			MessageAdded struct {
 				Text      string
 				CreatedBy string
 			}
 		}
-		require.NoError(t, sub.Next(&resp))
-		require.Equal(t, "Hello!", resp.MessageAdded.Text)
-		require.Equal(t, "vektah", resp.MessageAdded.CreatedBy)
+		err error
+	}
 
-		require.NoError(t, sub.Next(&resp))
-		require.Equal(t, "Whats up?", resp.MessageAdded.Text)
-		require.Equal(t, "vektah", resp.MessageAdded.CreatedBy)
-	})
+	msg.err = sub.Next(&msg.resp)
+	require.NoError(t, msg.err, "sub.Next")
+	require.Equal(t, "Hello!", msg.resp.MessageAdded.Text)
+	require.Equal(t, "vektah", msg.resp.MessageAdded.CreatedBy)
 
-	t.Run("post two messages", func(t *testing.T) {
-		t.Parallel()
-
-		wg.Wait()
-		var resp interface{}
-		c.MustPost(`mutation { 
-			a:post(text:"Hello!", roomName:"#gophers", username:"vektah") { id } 
-			b:post(text:"Whats up?", roomName:"#gophers", username:"vektah") { id } 
-		}`, &resp)
-	})
-
+	msg.err = sub.Next(&msg.resp)
+	require.NoError(t, msg.err, "sub.Next")
+	require.Equal(t, "Whats up?", msg.resp.MessageAdded.Text)
+	require.Equal(t, "vektah", msg.resp.MessageAdded.CreatedBy)
 }

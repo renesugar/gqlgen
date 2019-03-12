@@ -73,16 +73,37 @@ func (p *Client) mkRequest(query string, options ...Option) Request {
 	return r
 }
 
-func (p *Client) Post(query string, response interface{}, options ...Option) error {
+type ResponseData struct {
+	Data       interface{}
+	Errors     json.RawMessage
+	Extensions map[string]interface{}
+}
+
+func (p *Client) Post(query string, response interface{}, options ...Option) (resperr error) {
+	respDataRaw, resperr := p.RawPost(query, options...)
+	if resperr != nil {
+		return resperr
+	}
+
+	// we want to unpack even if there is an error, so we can see partial responses
+	unpackErr := unpack(respDataRaw.Data, response)
+
+	if respDataRaw.Errors != nil {
+		return RawJsonError{respDataRaw.Errors}
+	}
+	return unpackErr
+}
+
+func (p *Client) RawPost(query string, options ...Option) (*ResponseData, error) {
 	r := p.mkRequest(query, options...)
 	requestBody, err := json.Marshal(r)
 	if err != nil {
-		return fmt.Errorf("encode: %s", err.Error())
+		return nil, fmt.Errorf("encode: %s", err.Error())
 	}
 
 	rawResponse, err := p.client.Post(p.url, "application/json", bytes.NewBuffer(requestBody))
 	if err != nil {
-		return fmt.Errorf("post: %s", err.Error())
+		return nil, fmt.Errorf("post: %s", err.Error())
 	}
 	defer func() {
 		_ = rawResponse.Body.Close()
@@ -90,30 +111,23 @@ func (p *Client) Post(query string, response interface{}, options ...Option) err
 
 	if rawResponse.StatusCode >= http.StatusBadRequest {
 		responseBody, _ := ioutil.ReadAll(rawResponse.Body)
-		return fmt.Errorf("http %d: %s", rawResponse.StatusCode, responseBody)
+		return nil, fmt.Errorf("http %d: %s", rawResponse.StatusCode, responseBody)
 	}
 
 	responseBody, err := ioutil.ReadAll(rawResponse.Body)
 	if err != nil {
-		return fmt.Errorf("read: %s", err.Error())
+		return nil, fmt.Errorf("read: %s", err.Error())
 	}
 
 	// decode it into map string first, let mapstructure do the final decode
 	// because it can be much stricter about unknown fields.
-	respDataRaw := struct {
-		Data   interface{}
-		Errors json.RawMessage
-	}{}
+	respDataRaw := &ResponseData{}
 	err = json.Unmarshal(responseBody, &respDataRaw)
 	if err != nil {
-		return fmt.Errorf("decode: %s", err.Error())
+		return nil, fmt.Errorf("decode: %s", err.Error())
 	}
 
-	if respDataRaw.Errors != nil {
-		return RawJsonError{respDataRaw.Errors}
-	}
-
-	return unpack(respDataRaw.Data, response)
+	return respDataRaw, nil
 }
 
 type RawJsonError struct {

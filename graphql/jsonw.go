@@ -2,7 +2,6 @@ package graphql
 
 import (
 	"io"
-	"strconv"
 )
 
 var nullLit = []byte(`null`)
@@ -15,9 +14,9 @@ var closeBracket = []byte(`]`)
 var colon = []byte(`:`)
 var comma = []byte(`,`)
 
-var Null = lit(nullLit)
-var True = lit(trueLit)
-var False = lit(falseLit)
+var Null = &lit{nullLit}
+var True = &lit{trueLit}
+var False = &lit{falseLit}
 
 type Marshaler interface {
 	MarshalGQL(w io.Writer)
@@ -27,40 +26,10 @@ type Unmarshaler interface {
 	UnmarshalGQL(v interface{}) error
 }
 
-type OrderedMap struct {
-	Keys   []string
-	Values []Marshaler
-}
-
 type WriterFunc func(writer io.Writer)
 
 func (f WriterFunc) MarshalGQL(w io.Writer) {
 	f(w)
-}
-
-func NewOrderedMap(len int) *OrderedMap {
-	return &OrderedMap{
-		Keys:   make([]string, len),
-		Values: make([]Marshaler, len),
-	}
-}
-
-func (m *OrderedMap) Add(key string, value Marshaler) {
-	m.Keys = append(m.Keys, key)
-	m.Values = append(m.Values, value)
-}
-
-func (m *OrderedMap) MarshalGQL(writer io.Writer) {
-	writer.Write(openBrace)
-	for i, key := range m.Keys {
-		if i != 0 {
-			writer.Write(comma)
-		}
-		io.WriteString(writer, strconv.Quote(key))
-		writer.Write(colon)
-		m.Values[i].MarshalGQL(writer)
-	}
-	writer.Write(closeBrace)
 }
 
 type Array []Marshaler
@@ -76,8 +45,8 @@ func (a Array) MarshalGQL(writer io.Writer) {
 	writer.Write(closeBracket)
 }
 
-func lit(b []byte) Marshaler {
-	return WriterFunc(func(w io.Writer) {
-		w.Write(b)
-	})
+type lit struct{ b []byte }
+
+func (l lit) MarshalGQL(w io.Writer) {
+	w.Write(l.b)
 }

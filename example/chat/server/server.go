@@ -6,11 +6,11 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/99designs/gqlgen/example/chat"
+	"github.com/99designs/gqlgen/handler"
 	"github.com/gorilla/websocket"
 	"github.com/opentracing/opentracing-go"
-	"github.com/vektah/gqlgen/example/chat"
-	"github.com/vektah/gqlgen/handler"
-	gqlopentracing "github.com/vektah/gqlgen/opentracing"
+	"github.com/rs/cors"
 	"sourcegraph.com/sourcegraph/appdash"
 	appdashtracer "sourcegraph.com/sourcegraph/appdash/opentracing"
 	"sourcegraph.com/sourcegraph/appdash/traceapp"
@@ -19,15 +19,18 @@ import (
 func main() {
 	startAppdashServer()
 
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowCredentials: true,
+	})
+
 	http.Handle("/", handler.Playground("Todo", "/query"))
-	http.Handle("/query", handler.GraphQL(chat.MakeExecutableSchema(chat.New()),
-		handler.ResolverMiddleware(gqlopentracing.ResolverMiddleware()),
-		handler.RequestMiddleware(gqlopentracing.RequestMiddleware()),
+	http.Handle("/query", c.Handler(handler.GraphQL(chat.NewExecutableSchema(chat.New()),
 		handler.WebsocketUpgrader(websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
 			},
-		})),
+		}))),
 	)
 	log.Fatal(http.ListenAndServe(":8085", nil))
 }

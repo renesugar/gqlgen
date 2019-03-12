@@ -2,7 +2,7 @@
 title: "Optimizing N+1 database queries using Dataloaders"
 description: Speeding up your GraphQL requests by reducing the number of round trips to the database.  
 linkTitle: Dataloaders
-menu: main
+menu: { main: { parent: 'reference' } }
 ---
 
 Have you noticed some GraphQL queries end can make hundreds of database 
@@ -152,4 +152,4 @@ The generated UserLoader has a few other useful methods on it:
  - `LoadAll(keys)`: If you know up front you want a bunch users
  - `Prime(key, user)`: Used to sync state between similar loaders (usersById, usersByNote)
 
-You can see the full working example [here](https://github.com/vektah/gqlgen-tutorials/tree/master/dataloader) 
+You can see the full working example [here](https://github.com/vektah/gqlgen-tutorials/tree/master/dataloader)

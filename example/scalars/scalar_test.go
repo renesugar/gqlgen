@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/99designs/gqlgen/client"
+	"github.com/99designs/gqlgen/graphql/introspection"
+	"github.com/99designs/gqlgen/handler"
 	"github.com/stretchr/testify/require"
-	"github.com/vektah/gqlgen/client"
-	"github.com/vektah/gqlgen/handler"
-	introspection "github.com/vektah/gqlgen/neelance/introspection"
 )
 
 type RawUser struct {
@@ -22,7 +22,7 @@ type RawUser struct {
 }
 
 func TestScalars(t *testing.T) {
-	srv := httptest.NewServer(handler.GraphQL(MakeExecutableSchema(&Resolver{})))
+	srv := httptest.NewServer(handler.GraphQL(NewExecutableSchema(Config{Resolvers: &Resolver{}})))
 	c := client.New(srv.URL)
 
 	t.Run("marshaling", func(t *testing.T) {
@@ -41,7 +41,9 @@ func TestScalars(t *testing.T) {
 			fragment UserData on User  { id name created tier address { location } }`, &resp)
 
 		require.Equal(t, "1,2", resp.User.Address.Location)
-		require.Equal(t, time.Now().Unix(), resp.User.Created)
+		// There can be a delay between creation and test assertion, so we
+		// give some leeway to eliminate false positives.
+		require.WithinDuration(t, time.Now(), time.Unix(resp.User.Created, 0), 5*time.Second)
 		require.Equal(t, "6,66", resp.Search[0].Address.Location)
 		require.Equal(t, int64(666), resp.Search[0].Created)
 		require.Equal(t, "A", resp.Search[0].Tier)
@@ -59,7 +61,7 @@ func TestScalars(t *testing.T) {
 		var resp struct{ Search []RawUser }
 
 		err := c.Post(`{ search(input:{createdAfter:"2014"}) { id } }`, &resp)
-		require.EqualError(t, err, `[{"message":"time should be a unix timestamp"}]`)
+		require.EqualError(t, err, `[{"message":"time should be a unix timestamp","path":["search"]}]`)
 	})
 
 	t.Run("scalar resolver methods", func(t *testing.T) {

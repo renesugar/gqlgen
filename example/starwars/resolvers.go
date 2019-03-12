@@ -1,24 +1,56 @@
-//go:generate gorunpkg github.com/vektah/gqlgen -typemap types.json -out generated.go
+//go:generate rm -rf generated
+//go:generate go run ../../testdata/gqlgen.go
 
 package starwars
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/99designs/gqlgen/example/starwars/generated"
+
+	"github.com/99designs/gqlgen/example/starwars/models"
 )
 
 type Resolver struct {
-	humans    map[string]Human
-	droid     map[string]Droid
-	starships map[string]Starship
-	reviews   map[Episode][]Review
+	humans    map[string]models.Human
+	droid     map[string]models.Droid
+	starships map[string]models.Starship
+	reviews   map[models.Episode][]models.Review
 }
 
-func (r *Resolver) resolveCharacters(ctx context.Context, ids []string) ([]Character, error) {
-	var result []Character
+func (r *Resolver) Droid() generated.DroidResolver {
+	return &droidResolver{r}
+}
+
+func (r *Resolver) FriendsConnection() generated.FriendsConnectionResolver {
+	return &friendsConnectionResolver{r}
+}
+
+func (r *Resolver) Human() generated.HumanResolver {
+	return &humanResolver{r}
+}
+
+func (r *Resolver) Mutation() generated.MutationResolver {
+	return &mutationResolver{r}
+}
+
+func (r *Resolver) Query() generated.QueryResolver {
+	return &queryResolver{r}
+}
+
+func (r *Resolver) Starship() generated.StarshipResolver {
+	return &starshipResolver{r}
+}
+
+func (r *Resolver) resolveCharacters(ctx context.Context, ids []string) ([]models.Character, error) {
+	var result []models.Character
 	for _, id := range ids {
-		char, err := r.Query_character(ctx, id)
+		char, err := r.Query().Character(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -27,18 +59,81 @@ func (r *Resolver) resolveCharacters(ctx context.Context, ids []string) ([]Chara
 	return result, nil
 }
 
-func (r *Resolver) Human_friends(ctx context.Context, it *Human) ([]Character, error) {
-	return r.resolveCharacters(ctx, it.FriendIds)
+type droidResolver struct{ *Resolver }
+
+func (r *droidResolver) Friends(ctx context.Context, obj *models.Droid) ([]models.Character, error) {
+	return r.resolveCharacters(ctx, obj.FriendIds)
 }
 
-func (r *Resolver) Human_friendsConnection(ctx context.Context, it *Human, first *int, after *string) (FriendsConnection, error) {
-	return r.resolveFriendConnection(ctx, it.FriendIds, first, after)
+func (r *droidResolver) FriendsConnection(ctx context.Context, obj *models.Droid, first *int, after *string) (*models.FriendsConnection, error) {
+	return r.resolveFriendConnection(ctx, obj.FriendIds, first, after)
 }
 
-func (r *Resolver) Human_starships(ctx context.Context, it *Human) ([]Starship, error) {
-	var result []Starship
-	for _, id := range it.StarshipIds {
-		char, err := r.Query_starship(ctx, id)
+type friendsConnectionResolver struct{ *Resolver }
+
+func (r *Resolver) resolveFriendConnection(ctx context.Context, ids []string, first *int, after *string) (*models.FriendsConnection, error) {
+	from := 0
+	if after != nil {
+		b, err := base64.StdEncoding.DecodeString(*after)
+		if err != nil {
+			return nil, err
+		}
+		i, err := strconv.Atoi(strings.TrimPrefix(string(b), "cursor"))
+		if err != nil {
+			return nil, err
+		}
+		from = i
+	}
+
+	to := len(ids)
+	if first != nil {
+		to = from + *first
+		if to > len(ids) {
+			to = len(ids)
+		}
+	}
+
+	return &models.FriendsConnection{
+		Ids:  ids,
+		From: from,
+		To:   to,
+	}, nil
+}
+
+func (r *friendsConnectionResolver) Edges(ctx context.Context, obj *models.FriendsConnection) ([]models.FriendsEdge, error) {
+	friends, err := r.resolveCharacters(ctx, obj.Ids)
+	if err != nil {
+		return nil, err
+	}
+
+	edges := make([]models.FriendsEdge, obj.To-obj.From)
+	for i := range edges {
+		edges[i] = models.FriendsEdge{
+			Cursor: models.EncodeCursor(obj.From + i),
+			Node:   friends[obj.From+i],
+		}
+	}
+	return edges, nil
+}
+
+func (r *friendsConnectionResolver) Friends(ctx context.Context, obj *models.FriendsConnection) ([]models.Character, error) {
+	return r.resolveCharacters(ctx, obj.Ids)
+}
+
+type humanResolver struct{ *Resolver }
+
+func (r *humanResolver) Friends(ctx context.Context, obj *models.Human) ([]models.Character, error) {
+	return r.resolveCharacters(ctx, obj.FriendIds)
+}
+
+func (r *humanResolver) FriendsConnection(ctx context.Context, obj *models.Human, first *int, after *string) (*models.FriendsConnection, error) {
+	return r.resolveFriendConnection(ctx, obj.FriendIds, first, after)
+}
+
+func (r *humanResolver) Starships(ctx context.Context, obj *models.Human) ([]models.Starship, error) {
+	var result []models.Starship
+	for _, id := range obj.StarshipIds {
+		char, err := r.Query().Starship(ctx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -49,55 +144,30 @@ func (r *Resolver) Human_starships(ctx context.Context, it *Human) ([]Starship, 
 	return result, nil
 }
 
-func (r *Resolver) Droid_friends(ctx context.Context, it *Droid) ([]Character, error) {
-	return r.resolveCharacters(ctx, it.FriendIds)
-}
+type mutationResolver struct{ *Resolver }
 
-func (r *Resolver) Droid_friendsConnection(ctx context.Context, it *Droid, first *int, after *string) (FriendsConnection, error) {
-	return r.resolveFriendConnection(ctx, it.FriendIds, first, after)
-}
-
-func (r *Resolver) FriendsConnection_edges(ctx context.Context, it *FriendsConnection) ([]FriendsEdge, error) {
-	friends, err := r.resolveCharacters(ctx, it.ids)
-	if err != nil {
-		return nil, err
-	}
-
-	edges := make([]FriendsEdge, it.to-it.from)
-	for i := range edges {
-		edges[i] = FriendsEdge{
-			Cursor: encodeCursor(it.from + i),
-			Node:   friends[i],
-		}
-	}
-	return edges, nil
-}
-
-// A list of the friends, as a convenience when edges are not needed.
-func (r *Resolver) FriendsConnection_friends(ctx context.Context, it *FriendsConnection) ([]Character, error) {
-	return r.resolveCharacters(ctx, it.ids)
-}
-
-func (r *Resolver) Mutation_createReview(ctx context.Context, episode Episode, review Review) (*Review, error) {
+func (r *mutationResolver) CreateReview(ctx context.Context, episode models.Episode, review models.Review) (*models.Review, error) {
 	review.Time = time.Now()
 	time.Sleep(1 * time.Second)
 	r.reviews[episode] = append(r.reviews[episode], review)
 	return &review, nil
 }
 
-func (r *Resolver) Query_hero(ctx context.Context, episode Episode) (Character, error) {
-	if episode == EpisodeEmpire {
+type queryResolver struct{ *Resolver }
+
+func (r *queryResolver) Hero(ctx context.Context, episode *models.Episode) (models.Character, error) {
+	if *episode == models.EpisodeEmpire {
 		return r.humans["1000"], nil
 	}
 	return r.droid["2001"], nil
 }
 
-func (r *Resolver) Query_reviews(ctx context.Context, episode Episode, since *time.Time) ([]Review, error) {
+func (r *queryResolver) Reviews(ctx context.Context, episode models.Episode, since *time.Time) ([]models.Review, error) {
 	if since == nil {
 		return r.reviews[episode], nil
 	}
 
-	var filtered []Review
+	var filtered []models.Review
 	for _, rev := range r.reviews[episode] {
 		if rev.Time.After(*since) {
 			filtered = append(filtered, rev)
@@ -106,8 +176,8 @@ func (r *Resolver) Query_reviews(ctx context.Context, episode Episode, since *ti
 	return filtered, nil
 }
 
-func (r *Resolver) Query_search(ctx context.Context, text string) ([]SearchResult, error) {
-	var l []SearchResult
+func (r *queryResolver) Search(ctx context.Context, text string) ([]models.SearchResult, error) {
+	var l []models.SearchResult
 	for _, h := range r.humans {
 		if strings.Contains(h.Name, text) {
 			l = append(l, h)
@@ -126,7 +196,7 @@ func (r *Resolver) Query_search(ctx context.Context, text string) ([]SearchResul
 	return l, nil
 }
 
-func (r *Resolver) Query_character(ctx context.Context, id string) (Character, error) {
+func (r *queryResolver) Character(ctx context.Context, id string) (models.Character, error) {
 	if h, ok := r.humans[id]; ok {
 		return &h, nil
 	}
@@ -135,105 +205,121 @@ func (r *Resolver) Query_character(ctx context.Context, id string) (Character, e
 	}
 	return nil, nil
 }
-func (r *Resolver) Query_droid(ctx context.Context, id string) (*Droid, error) {
+
+func (r *queryResolver) Droid(ctx context.Context, id string) (*models.Droid, error) {
 	if d, ok := r.droid[id]; ok {
 		return &d, nil
 	}
 	return nil, nil
 }
-func (r *Resolver) Query_human(ctx context.Context, id string) (*Human, error) {
+
+func (r *queryResolver) Human(ctx context.Context, id string) (*models.Human, error) {
 	if h, ok := r.humans[id]; ok {
 		return &h, nil
 	}
 	return nil, nil
 }
-func (r *Resolver) Query_starship(ctx context.Context, id string) (*Starship, error) {
+
+func (r *queryResolver) Starship(ctx context.Context, id string) (*models.Starship, error) {
 	if s, ok := r.starships[id]; ok {
 		return &s, nil
 	}
 	return nil, nil
 }
 
-func NewResolver() *Resolver {
+type starshipResolver struct{ *Resolver }
+
+func (r *starshipResolver) Length(ctx context.Context, obj *models.Starship, unit *models.LengthUnit) (float64, error) {
+	switch *unit {
+	case models.LengthUnitMeter, "":
+		return obj.Length, nil
+	case models.LengthUnitFoot:
+		return obj.Length * 3.28084, nil
+	default:
+		return 0, errors.New("invalid unit")
+	}
+}
+
+func NewResolver() generated.Config {
 	r := Resolver{}
-	r.humans = map[string]Human{
+	r.humans = map[string]models.Human{
 		"1000": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "1000",
 				Name:      "Luke Skywalker",
 				FriendIds: []string{"1002", "1003", "2000", "2001"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
-			heightMeters: 1.72,
+			HeightMeters: 1.72,
 			Mass:         77,
 			StarshipIds:  []string{"3001", "3003"},
 		},
 		"1001": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "1001",
 				Name:      "Darth Vader",
 				FriendIds: []string{"1004"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
-			heightMeters: 2.02,
+			HeightMeters: 2.02,
 			Mass:         136,
 			StarshipIds:  []string{"3002"},
 		},
 		"1002": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "1002",
 				Name:      "Han Solo",
 				FriendIds: []string{"1000", "1003", "2001"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
-			heightMeters: 1.8,
+			HeightMeters: 1.8,
 			Mass:         80,
 			StarshipIds:  []string{"3000", "3003"},
 		},
 		"1003": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "1003",
 				Name:      "Leia Organa",
 				FriendIds: []string{"1000", "1002", "2000", "2001"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
-			heightMeters: 1.5,
+			HeightMeters: 1.5,
 			Mass:         49,
 		},
 		"1004": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "1004",
 				Name:      "Wilhuff Tarkin",
 				FriendIds: []string{"1001"},
-				AppearsIn: []Episode{EpisodeNewhope},
+				AppearsIn: []models.Episode{models.EpisodeNewhope},
 			},
-			heightMeters: 1.8,
+			HeightMeters: 1.8,
 			Mass:         0,
 		},
 	}
 
-	r.droid = map[string]Droid{
+	r.droid = map[string]models.Droid{
 		"2000": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "2000",
 				Name:      "C-3PO",
 				FriendIds: []string{"1000", "1002", "1003", "2001"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
 			PrimaryFunction: "Protocol",
 		},
 		"2001": {
-			CharacterFields: CharacterFields{
+			CharacterFields: models.CharacterFields{
 				ID:        "2001",
 				Name:      "R2-D2",
 				FriendIds: []string{"1000", "1002", "1003"},
-				AppearsIn: []Episode{EpisodeNewhope, EpisodeEmpire, EpisodeJedi},
+				AppearsIn: []models.Episode{models.EpisodeNewhope, models.EpisodeEmpire, models.EpisodeJedi},
 			},
 			PrimaryFunction: "Astromech",
 		},
 	}
 
-	r.starships = map[string]Starship{
+	r.starships = map[string]models.Starship{
 		"3000": {
 			ID:   "3000",
 			Name: "Millennium Falcon",
@@ -243,7 +329,7 @@ func NewResolver() *Resolver {
 				{1, 2},
 				{3, 2},
 			},
-			lengthMeters: 34.37,
+			Length: 34.37,
 		},
 		"3001": {
 			ID:   "3001",
@@ -254,7 +340,7 @@ func NewResolver() *Resolver {
 				{2, 3},
 				{5, 1},
 			},
-			lengthMeters: 12.5,
+			Length: 12.5,
 		},
 		"3002": {
 			ID:   "3002",
@@ -265,7 +351,7 @@ func NewResolver() *Resolver {
 				{6, 4},
 				{3, 2},
 			},
-			lengthMeters: 9.2,
+			Length: 9.2,
 		},
 		"3003": {
 			ID:   "3003",
@@ -276,11 +362,13 @@ func NewResolver() *Resolver {
 				{5, 3},
 				{7, 1},
 			},
-			lengthMeters: 20,
+			Length: 20,
 		},
 	}
 
-	r.reviews = map[Episode][]Review{}
+	r.reviews = map[models.Episode][]models.Review{}
 
-	return &r
+	return generated.Config{
+		Resolvers: &r,
+	}
 }

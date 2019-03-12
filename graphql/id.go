@@ -1,6 +1,7 @@
 package graphql
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -15,6 +16,8 @@ func UnmarshalID(v interface{}) (string, error) {
 	switch v := v.(type) {
 	case string:
 		return v, nil
+	case json.Number:
+		return string(v), nil
 	case int:
 		return strconv.Itoa(v), nil
 	case float64:
@@ -29,5 +32,26 @@ func UnmarshalID(v interface{}) (string, error) {
 		return "null", nil
 	default:
 		return "", fmt.Errorf("%T is not a string", v)
+	}
+}
+
+func MarshalIntID(i int) Marshaler {
+	return WriterFunc(func(w io.Writer) {
+		writeQuotedString(w, strconv.Itoa(i))
+	})
+}
+
+func UnmarshalIntID(v interface{}) (int, error) {
+	switch v := v.(type) {
+	case string:
+		return strconv.Atoi(v)
+	case int:
+		return v, nil
+	case int64:
+		return int(v), nil
+	case json.Number:
+		return strconv.Atoi(string(v))
+	default:
+		return 0, fmt.Errorf("%T is not an int", v)
 	}
 }

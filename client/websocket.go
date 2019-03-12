@@ -6,20 +6,15 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
-	"github.com/vektah/gqlgen/neelance/errors"
+	"github.com/vektah/gqlparser/gqlerror"
 )
 
 const (
-	connectionInitMsg      = "connection_init"      // Client -> Server
-	connectionTerminateMsg = "connection_terminate" // Client -> Server
-	startMsg               = "start"                // Client -> Server
-	stopMsg                = "stop"                 // Client -> Server
-	connectionAckMsg       = "connection_ack"       // Server -> Client
-	connectionErrorMsg     = "connection_error"     // Server -> Client
-	connectionKeepAliveMsg = "ka"                   // Server -> Client
-	dataMsg                = "data"                 // Server -> Client
-	errorMsg               = "error"                // Server -> Client
-	completeMsg            = "complete"             // Server -> Client
+	connectionInitMsg = "connection_init" // Client -> Server
+	startMsg          = "start"           // Client -> Server
+	connectionAckMsg  = "connection_ack"  // Server -> Client
+	dataMsg           = "data"            // Server -> Client
+	errorMsg          = "error"           // Server -> Client
 )
 
 type operationMessage struct {
@@ -43,6 +38,10 @@ func errorSubscription(err error) *Subscription {
 }
 
 func (p *Client) Websocket(query string, options ...Option) *Subscription {
+	return p.WebsocketWithPayload(query, nil, options...)
+}
+
+func (p *Client) WebsocketWithPayload(query string, initPayload map[string]interface{}, options ...Option) *Subscription {
 	r := p.mkRequest(query, options...)
 	requestBody, err := json.Marshal(r)
 	if err != nil {
@@ -57,12 +56,20 @@ func (p *Client) Websocket(query string, options ...Option) *Subscription {
 		return errorSubscription(fmt.Errorf("dial: %s", err.Error()))
 	}
 
-	if err = c.WriteJSON(operationMessage{Type: connectionInitMsg}); err != nil {
+	initMessage := operationMessage{Type: connectionInitMsg}
+	if initPayload != nil {
+		initMessage.Payload, err = json.Marshal(initPayload)
+		if err != nil {
+			return errorSubscription(fmt.Errorf("parse payload: %s", err.Error()))
+		}
+	}
+
+	if err = c.WriteJSON(initMessage); err != nil {
 		return errorSubscription(fmt.Errorf("init: %s", err.Error()))
 	}
 
 	var ack operationMessage
-	if err := c.ReadJSON(&ack); err != nil {
+	if err = c.ReadJSON(&ack); err != nil {
 		return errorSubscription(fmt.Errorf("ack: %s", err.Error()))
 	}
 	if ack.Type != connectionAckMsg {
@@ -77,9 +84,16 @@ func (p *Client) Websocket(query string, options ...Option) *Subscription {
 		Close: c.Close,
 		Next: func(response interface{}) error {
 			var op operationMessage
-			c.ReadJSON(&op)
+			err := c.ReadJSON(&op)
+			if err != nil {
+				return err
+			}
 			if op.Type != dataMsg {
-				return fmt.Errorf("expected data message, got %#v", op)
+				if op.Type == errorMsg {
+					return fmt.Errorf(string(op.Payload))
+				} else {
+					return fmt.Errorf("expected data message, got %#v", op)
+				}
 			}
 
 			respDataRaw := map[string]interface{}{}
@@ -89,8 +103,8 @@ func (p *Client) Websocket(query string, options ...Option) *Subscription {
 			}
 
 			if respDataRaw["errors"] != nil {
-				var errs []*errors.QueryError
-				if err := unpack(respDataRaw["errors"], errs); err != nil {
+				var errs []*gqlerror.Error
+				if err = unpack(respDataRaw["errors"], &errs); err != nil {
 					return err
 				}
 				if len(errs) > 0 {
